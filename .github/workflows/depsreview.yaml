@@ -16,7 +16,7 @@
 # under the License.
 
 name: 'Dependency Review'
-on: [pull_request]
+on: [workflow_dispatch]
 
 permissions:
   contents: read
@@ -24,6 +24,7 @@ permissions:
 jobs:
   dependency-review:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: 'Checkout Repository'
         uses: actions/checkout@v3

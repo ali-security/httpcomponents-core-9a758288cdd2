@@ -30,13 +30,7 @@
 name: "CodeQL"
 
 on:
-  push:
-    branches: [ master ]
-  pull_request:
-    # The branches below must be a subset of the branches above
-    branches: [ master ]
-  schedule:
-    - cron: '16 7 * * 5'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -49,6 +43,7 @@ jobs:
       security-events: write  # for github/codeql-action/analyze to upload SARIF results
     name: Analyze
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false

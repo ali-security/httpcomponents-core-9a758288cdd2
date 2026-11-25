@@ -15,7 +15,13 @@
 
 name: Java CI
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional surefire -Dtest selector; empty runs the full suite'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -24,6 +30,7 @@ jobs:
   build:
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       matrix:
         # windows-latest is not used due to intermittent network failures
@@ -37,7 +44,7 @@ jobs:
         
     steps:
     - uses: actions/checkout@v3
-    - uses: actions/cache@v3
+    - uses: actions/cache@v4
       with:
         path: ~/.m2/repository
         key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
@@ -48,5 +55,40 @@ jobs:
       with:
         distribution: 'temurin'
         java-version: ${{ matrix.java }}
+        cache: maven
     - name: Build with Maven
-      run: mvn -V --file pom.xml --no-transfer-progress -DtrimStackTrace=false -P-use-toolchains
+      run: |
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          mvn -V --file pom.xml --no-transfer-progress -DtrimStackTrace=false -P-use-toolchains -Dcheckstyle.skip=true -Drat.skip=true -Djapicmp.skip=true -Danimal.sniffer.skip=true -Dtest='${{ inputs.test-filter }}' -Dsurefire.failIfNoSpecifiedTests=false -DfailIfNoTests=false
+        else
+          mvn -V --file pom.xml --no-transfer-progress -DtrimStackTrace=false -P-use-toolchains -Dcheckstyle.skip=true -Drat.skip=true -Djapicmp.skip=true -Danimal.sniffer.skip=true
+        fi
+    - name: Test summary and skipped tests
+      if: always()
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        import glob, xml.etree.ElementTree as ET
+        tot = fail = err = skip = 0
+        skipped = []
+        for f in sorted(glob.glob('**/target/surefire-reports/TEST-*.xml', recursive=True)):
+            r = ET.parse(f).getroot()
+            tot += int(r.get('tests', 0)); fail += int(r.get('failures', 0))
+            err += int(r.get('errors', 0)); skip += int(r.get('skipped', 0))
+            for tc in r.iter('testcase'):
+                s = tc.find('skipped')
+                if s is not None:
+                    reason = (s.get('message') or (s.text or '')).strip().splitlines()
+                    skipped.append('%s.%s: %s' % (tc.get('classname'), tc.get('name'), reason[0] if reason else 'no reason given'))
+        print('SKIPPED TESTS (%d):' % len(skipped))
+        for line in skipped:
+            print('  SKIPPED ' + line)
+        print('SUREFIRE TOTAL: tests=%d passed=%d failures=%d errors=%d skipped=%d' % (tot, tot - fail - err - skip, fail, err, skip))
+        PY
+    - name: Upload httpcore5-h2 jar
+      if: matrix.os == 'ubuntu-latest' && matrix.java == 8
+      uses: actions/upload-artifact@v4
+      with:
+        name: httpcore5-h2-jar
+        path: httpcore5-h2/target/httpcore5-h2-5.2.5.jar
+        if-no-files-found: error
