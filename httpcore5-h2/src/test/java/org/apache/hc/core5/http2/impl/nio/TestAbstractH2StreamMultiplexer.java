@@ -28,11 +28,19 @@
 package org.apache.hc.core5.http2.impl.nio;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
+import org.apache.hc.core5.http.Header;
+import org.apache.hc.core5.http.RequestHeaderFieldsTooLargeException;
 import org.apache.hc.core5.http.config.CharCodingConfig;
 import org.apache.hc.core5.http.impl.BasicHttpConnectionMetrics;
+import org.apache.hc.core5.http.message.BasicHeader;
 import org.apache.hc.core5.http.nio.AsyncPushConsumer;
+import org.apache.hc.core5.http.nio.AsyncServerExchangeHandler;
 import org.apache.hc.core5.http.nio.HandlerFactory;
 import org.apache.hc.core5.http.nio.command.ExecutableCommand;
 import org.apache.hc.core5.http.protocol.HttpProcessor;
@@ -45,7 +53,11 @@ import org.apache.hc.core5.http2.frame.FrameFactory;
 import org.apache.hc.core5.http2.frame.FrameType;
 import org.apache.hc.core5.http2.frame.RawFrame;
 import org.apache.hc.core5.http2.frame.StreamIdGenerator;
+import org.apache.hc.core5.http2.hpack.HPackDecoder;
+import org.apache.hc.core5.http2.hpack.HPackEncoder;
+import org.apache.hc.core5.http2.hpack.HeaderListConstraintException;
 import org.apache.hc.core5.reactor.ProtocolIOSession;
+import org.apache.hc.core5.util.ByteArrayBuffer;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -209,6 +221,106 @@ public class TestAbstractH2StreamMultiplexer {
                     Mockito.eq(1),
                     Mockito.any());
         });
+    }
+
+    @Test
+    public void testHPackDecoderUsesConfiguredMaxHeaderListSizeImmediately() throws Exception {
+        final int maxHeaderListSize = 128;
+
+        final H2Config h2Config = H2Config.custom()
+                .setMaxHeaderListSize(maxHeaderListSize)
+                .build();
+
+        final ProtocolIOSession ioSession = Mockito.mock(ProtocolIOSession.class);
+        final HttpProcessor httpProcessor = Mockito.mock(HttpProcessor.class);
+        final HandlerFactory<AsyncServerExchangeHandler> handlerFactory = Mockito.mock(HandlerFactory.class);
+
+        final ServerH2StreamMultiplexer multiplexer = new ServerH2StreamMultiplexer(
+                ioSession,
+                httpProcessor,
+                handlerFactory,
+                CharCodingConfig.DEFAULT,
+                h2Config);
+
+        final HPackDecoder hPackDecoder = getHPackDecoder(multiplexer);
+
+        Assertions.assertEquals(maxHeaderListSize, getMaxListSize(hPackDecoder));
+    }
+
+    @Test
+    public void testOversizedHeaderBlockRejectedBeforeSettingsAckServerSide() throws Exception {
+        final int maxHeaderListSize = 128;
+
+        final HandlerFactory<AsyncServerExchangeHandler> handlerFactory = Mockito.mock(HandlerFactory.class);
+        // Freshly constructed multiplexer: no onConnect(), no SETTINGS ACK from the peer,
+        // which is exactly the window an attacker uses to submit a header bomb.
+        final ServerH2StreamMultiplexer streamMultiplexer = new ServerH2StreamMultiplexer(
+                protocolIOSession,
+                httpProcessor,
+                handlerFactory,
+                CharCodingConfig.DEFAULT,
+                H2Config.custom()
+                        .setMaxHeaderListSize(maxHeaderListSize)
+                        .build());
+
+        final ByteBuffer headerBlock = encodeOversizedHeaderBlock();
+        Assertions.assertTrue(headerBlock.remaining() > 0);
+
+        Assertions.assertThrows(RequestHeaderFieldsTooLargeException.class, () ->
+                streamMultiplexer.decodeHeaders(headerBlock));
+    }
+
+    @Test
+    public void testOversizedHeaderBlockRejectedBeforeSettingsAck() throws Exception {
+        final int maxHeaderListSize = 128;
+
+        final AbstractH2StreamMultiplexer streamMultiplexer = new H2StreamMultiplexerImpl(
+                protocolIOSession,
+                DefaultFrameFactory.INSTANCE,
+                StreamIdGenerator.ODD,
+                httpProcessor,
+                CharCodingConfig.DEFAULT,
+                H2Config.custom()
+                        .setMaxHeaderListSize(maxHeaderListSize)
+                        .build(),
+                h2StreamListener);
+
+        final ByteBuffer headerBlock = encodeOversizedHeaderBlock();
+
+        Assertions.assertThrows(HeaderListConstraintException.class, () ->
+                streamMultiplexer.decodeHeaders(headerBlock));
+    }
+
+    /**
+     * An HPACK block that expands into a header list well beyond the 128 byte
+     * {@code MAX_HEADER_LIST_SIZE} configured by the tests above.
+     */
+    private static ByteBuffer encodeOversizedHeaderBlock() throws Exception {
+        final char[] padding = new char[256];
+        for (int i = 0; i < padding.length; i++) {
+            padding[i] = 'a';
+        }
+        final String value = new String(padding);
+        final List<Header> headers = new ArrayList<>();
+        for (int i = 0; i < 32; i++) {
+            headers.add(new BasicHeader("x-pad-" + i, value));
+        }
+        final HPackEncoder encoder = new HPackEncoder(StandardCharsets.US_ASCII);
+        final ByteArrayBuffer buf = new ByteArrayBuffer(1024);
+        encoder.encodeHeaders(buf, headers, true);
+        return ByteBuffer.wrap(buf.array(), 0, buf.length());
+    }
+
+    private static HPackDecoder getHPackDecoder(final AbstractH2StreamMultiplexer multiplexer) throws Exception {
+        final Field field = AbstractH2StreamMultiplexer.class.getDeclaredField("hPackDecoder");
+        field.setAccessible(true);
+        return (HPackDecoder) field.get(multiplexer);
+    }
+
+    private static int getMaxListSize(final HPackDecoder hPackDecoder) throws Exception {
+        final Field field = HPackDecoder.class.getDeclaredField("maxListSize");
+        field.setAccessible(true);
+        return field.getInt(hPackDecoder);
     }
 
 }

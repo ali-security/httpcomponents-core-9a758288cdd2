@@ -170,8 +170,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
 
         this.hPackDecoder.setMaxTableSize(H2Config.INIT.getHeaderTableSize());
         this.hPackEncoder.setMaxTableSize(H2Config.INIT.getHeaderTableSize());
-        this.hPackDecoder.setMaxListSize(H2Config.INIT.getMaxHeaderListSize());
-
+        this.hPackDecoder.setMaxListSize(this.localConfig.getMaxHeaderListSize());
         this.lowMark = H2Config.INIT.getInitialWindowSize() / 2;
         this.streamListener = streamListener;
     }
